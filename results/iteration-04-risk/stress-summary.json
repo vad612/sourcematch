@@ -1,0 +1,76 @@
+{
+  "baseline": "strict",
+  "stress": {
+    "base_sales_retention": "0.80",
+    "sales_retention": "0.40",
+    "cost_multiplier": "1.40",
+    "inventory_charge": "0.02"
+  },
+  "plans": {
+    "cautious": {
+      "decisions": {
+        "брать": 144,
+        "не брать": 2779,
+        "проверить вручную": 777
+      },
+      "buys_with_projection": 144,
+      "buys_without_projection": 0,
+      "capital_uzs": "3710263249.8859200000000000000",
+      "base_contribution_uzs": "1067468991.1576428906666666666",
+      "stressed_capital_uzs": "5194368549.8402880000000000000",
+      "stressed_unsold_capital_uzs": "4194854060.5055608533333333333",
+      "stressed_contribution_uzs": "115647997.45516163626666666667",
+      "stressed_gross_losses_uzs": "36038276.529864136533333333334",
+      "stressed_loss_positions": 67
+    },
+    "logistics": {
+      "decisions": {
+        "брать": 149,
+        "не брать": 2175,
+        "проверить вручную": 1376
+      },
+      "buys_with_projection": 149,
+      "buys_without_projection": 0,
+      "capital_uzs": "3961283704.4155200000000000000",
+      "base_contribution_uzs": "1121147029.0869232106666666666",
+      "stressed_capital_uzs": "5545797186.1817280000000000000",
+      "stressed_unsold_capital_uzs": "4501789435.8755128533333333333",
+      "stressed_contribution_uzs": "119493998.97627459626666666667",
+      "stressed_gross_losses_uzs": "38249668.843336776533333333334",
+      "stressed_loss_positions": 69
+    },
+    "pilot": {
+      "decisions": {
+        "брать": 186,
+        "не брать": 2175,
+        "проверить вручную": 1339
+      },
+      "buys_with_projection": 186,
+      "buys_without_projection": 0,
+      "capital_uzs": "4835521820.8763200000000000000",
+      "base_contribution_uzs": "1371822125.6570066239999999999",
+      "stressed_capital_uzs": "6769730549.2268480000000000000",
+      "stressed_unsold_capital_uzs": "5499191589.2366051200000000000",
+      "stressed_contribution_uzs": "149931767.22502501760000000000",
+      "stressed_gross_losses_uzs": "43511163.418838856533333333334",
+      "stressed_loss_positions": 87
+    },
+    "strict": {
+      "decisions": {
+        "брать": 135,
+        "не брать": 2175,
+        "проверить вручную": 1390
+      },
+      "buys_with_projection": 135,
+      "buys_without_projection": 0,
+      "capital_uzs": "3545157383.9640000000000000000",
+      "base_contribution_uzs": "1030209746.4337263466666666666",
+      "stressed_capital_uzs": "4963220337.5496000000000000000",
+      "stressed_unsold_capital_uzs": "3988485589.5403269333333333333",
+      "stressed_contribution_uzs": "111243148.19992039466666666667",
+      "stressed_gross_losses_uzs": "36509562.433910773333333333334",
+      "stressed_loss_positions": 63
+    }
+  },
+  "cards_with_changed_decisions": 654
+}

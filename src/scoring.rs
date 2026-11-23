@@ -15,6 +15,7 @@ pub struct Profile {
     minimum_return: Decimal,
     pub logistics: Option<PeerPolicy>,
     pub demand: Option<DemandPolicy>,
+    pub deferral: Option<DeferralPolicy>,
 }
 
 #[derive(Deserialize)]
@@ -29,6 +30,46 @@ pub struct PeerPolicy {
 #[serde(deny_unknown_fields)]
 pub struct DemandPolicy {
     pub minimum_sources: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeferralPolicy {
+    pub require_confirmed_offer: bool,
+    pub require_margin_ceiling: bool,
+    minimum_disputed_demand_ratio: Decimal,
+    sparse_reviews_below: u32,
+    single_source_headroom: Decimal,
+}
+
+impl DeferralPolicy {
+    pub fn demand_reason(&self, listing: &Listing, market: &Market) -> Option<&'static str> {
+        match listing.demand {
+            [Some(a), Some(b)]
+                if a.max(b) >= market.minimum_orders
+                    && a.min(b)
+                        < market
+                            .minimum_orders
+                            .checked_mul(self.minimum_disputed_demand_ratio)? =>
+            {
+                Some("закупка отложена по профилю риска, нижняя оценка спроса заметно ниже порога")
+            }
+            [Some(demand), None] | [None, Some(demand)]
+                if listing
+                    .reviews
+                    .is_some_and(|n| n < self.sparse_reviews_below)
+                    && demand
+                        < market
+                            .minimum_orders
+                            .checked_mul(self.single_source_headroom)? =>
+            {
+                Some(
+                    "закупка отложена по профилю риска, единственный прогноз требует подтверждения",
+                )
+            }
+            _ => None,
+        }
+    }
 }
 
 impl Profile {
@@ -56,6 +97,13 @@ impl Profile {
                 "invalid demand source count"
             );
         }
+        if let Some(deferral) = &profile.deferral {
+            ensure!(
+                (Decimal::ZERO..=Decimal::ONE).contains(&deferral.minimum_disputed_demand_ratio)
+                    && deferral.single_source_headroom >= Decimal::ONE,
+                "invalid sourcing deferral thresholds"
+            );
+        }
         Ok(profile)
     }
 
@@ -75,7 +123,11 @@ impl Profile {
         economics: &Economics,
     ) -> Option<Projection> {
         let batch = purchase.batch_in_listing_units?;
-        let sold = self.demand_floor(listing)?.min(batch).floor();
+        let forecast_orders = *listing.demand.iter().flatten().min()?;
+        let sold = forecast_orders
+            .checked_mul(self.demand_retention)?
+            .min(batch)
+            .floor();
         let margin = economics.margin?.low;
         let cost = economics.landed?.high;
         let capital = cost.checked_mul(batch)?;
@@ -84,6 +136,7 @@ impl Profile {
             .checked_mul(sold)?
             .checked_sub(inventory.checked_mul(self.inventory_charge_rate)?)?;
         Some(Projection {
+            forecast_orders,
             sold_units: sold,
             batch_units: batch,
             unit_margin_uzs: margin,
@@ -119,8 +172,9 @@ impl Profile {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct Projection {
+    pub forecast_orders: Decimal,
     pub sold_units: Decimal,
     pub batch_units: Decimal,
     pub unit_margin_uzs: Decimal,
@@ -130,12 +184,13 @@ pub struct Projection {
     pub return_on_capital: Decimal,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, Ord, PartialOrd)]
 #[serde(rename_all = "snake_case")]
 pub enum Wave {
     Confirmed,
     ComparableLogistics,
     DemandStress,
+    Deferred,
     #[default]
     Manual,
 }

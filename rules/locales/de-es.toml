@@ -1,0 +1,37 @@
+[[products]]
+key = "frame"
+aliases = ["bilderrahmen", "marco de fotos", "portarretratos"]
+
+[[products]]
+key = "vase"
+aliases = ["blumenvase", "jarrón", "florero"]
+
+[[materials]]
+key = "glass"
+aliases = ["glas", "vidrio", "cristal"]
+
+[[materials]]
+key = "metal"
+aliases = ["metall", "metal"]
+
+[[series]]
+key = "classic"
+aliases = ["klassik", "klassische serie", "clásica", "clásico"]
+
+[[traits]]
+key = "shape"
+value = "round"
+aliases = ["rund", "redondo", "redonda"]
+
+[[traits]]
+key = "shape"
+value = "square"
+aliases = ["quadratisch", "cuadrado", "cuadrada"]
+
+[[traits]]
+key = "mount"
+value = "wall"
+aliases = ["wandmontage", "para pared"]
+
+[units]
+piece = ["stück", "unidad", "pieza"]

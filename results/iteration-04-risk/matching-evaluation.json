@@ -1,0 +1,327 @@
+{
+  "total": {
+    "pairs": 8,
+    "correct_pairs": 8,
+    "false_acceptances": 0,
+    "fields": {
+      "kind": {
+        "checked": 16,
+        "exact": 16,
+        "missing": 0,
+        "wrong": 0,
+        "unexpected": 0
+      },
+      "material": {
+        "checked": 16,
+        "exact": 16,
+        "missing": 0,
+        "wrong": 0,
+        "unexpected": 0
+      },
+      "measures.dimensions": {
+        "checked": 6,
+        "exact": 6,
+        "missing": 0,
+        "wrong": 0,
+        "unexpected": 0
+      },
+      "measures.length": {
+        "checked": 10,
+        "exact": 10,
+        "missing": 0,
+        "wrong": 0,
+        "unexpected": 0
+      },
+      "series": {
+        "checked": 16,
+        "exact": 16,
+        "missing": 0,
+        "wrong": 0,
+        "unexpected": 0
+      },
+      "traits.mount": {
+        "checked": 5,
+        "exact": 5,
+        "missing": 0,
+        "wrong": 0,
+        "unexpected": 0
+      },
+      "traits.shape": {
+        "checked": 10,
+        "exact": 10,
+        "missing": 0,
+        "wrong": 0,
+        "unexpected": 0
+      },
+      "units": {
+        "checked": 16,
+        "exact": 16,
+        "missing": 0,
+        "wrong": 0,
+        "unexpected": 0
+      }
+    }
+  },
+  "by_locale": {
+    "de": {
+      "pairs": 2,
+      "correct_pairs": 2,
+      "false_acceptances": 0,
+      "fields": {
+        "kind": {
+          "checked": 4,
+          "exact": 4,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "material": {
+          "checked": 4,
+          "exact": 4,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "measures.length": {
+          "checked": 4,
+          "exact": 4,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "series": {
+          "checked": 4,
+          "exact": 4,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "traits.shape": {
+          "checked": 4,
+          "exact": 4,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "units": {
+          "checked": 4,
+          "exact": 4,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        }
+      }
+    },
+    "en": {
+      "pairs": 1,
+      "correct_pairs": 1,
+      "false_acceptances": 0,
+      "fields": {
+        "kind": {
+          "checked": 2,
+          "exact": 2,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "material": {
+          "checked": 2,
+          "exact": 2,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "measures.dimensions": {
+          "checked": 2,
+          "exact": 2,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "series": {
+          "checked": 2,
+          "exact": 2,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "traits.mount": {
+          "checked": 1,
+          "exact": 1,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "units": {
+          "checked": 2,
+          "exact": 2,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        }
+      }
+    },
+    "es": {
+      "pairs": 3,
+      "correct_pairs": 3,
+      "false_acceptances": 0,
+      "fields": {
+        "kind": {
+          "checked": 6,
+          "exact": 6,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "material": {
+          "checked": 6,
+          "exact": 6,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "measures.dimensions": {
+          "checked": 2,
+          "exact": 2,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "measures.length": {
+          "checked": 4,
+          "exact": 4,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "series": {
+          "checked": 6,
+          "exact": 6,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "traits.mount": {
+          "checked": 2,
+          "exact": 2,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "traits.shape": {
+          "checked": 4,
+          "exact": 4,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "units": {
+          "checked": 6,
+          "exact": 6,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        }
+      }
+    },
+    "ru": {
+      "pairs": 1,
+      "correct_pairs": 1,
+      "false_acceptances": 0,
+      "fields": {
+        "kind": {
+          "checked": 2,
+          "exact": 2,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "material": {
+          "checked": 2,
+          "exact": 2,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "measures.length": {
+          "checked": 2,
+          "exact": 2,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "series": {
+          "checked": 2,
+          "exact": 2,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "traits.shape": {
+          "checked": 2,
+          "exact": 2,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "units": {
+          "checked": 2,
+          "exact": 2,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        }
+      }
+    },
+    "zh": {
+      "pairs": 1,
+      "correct_pairs": 1,
+      "false_acceptances": 0,
+      "fields": {
+        "kind": {
+          "checked": 2,
+          "exact": 2,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "material": {
+          "checked": 2,
+          "exact": 2,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "measures.dimensions": {
+          "checked": 2,
+          "exact": 2,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "series": {
+          "checked": 2,
+          "exact": 2,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "traits.mount": {
+          "checked": 2,
+          "exact": 2,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        },
+        "units": {
+          "checked": 2,
+          "exact": 2,
+          "missing": 0,
+          "wrong": 0,
+          "unexpected": 0
+        }
+      }
+    }
+  },
+  "differences": []
+}

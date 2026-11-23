@@ -328,7 +328,7 @@ pub fn logistics(listing: &Facts, offer: &Offer, catalog: Option<&Catalog>) -> L
     if let Some(entry) = catalog {
         if logistics.kg.is_none() {
             logistics.kg = entry.weight;
-            logistics.weight_source = entry.weight.map(|_| format!("catalog:{}", entry.id));
+            logistics.weight_source = logistics.kg.map(|_| format!("catalog:{}", entry.id));
         }
         if logistics.retail_liters.is_none()
             && let Some(volume) = dimensions_liters(&entry.package)
@@ -358,6 +358,7 @@ pub fn economics(
     let duty = listing
         .facts
         .material
+        .as_deref()
         .and_then(|material| market.duties.get(material))
         .copied();
     let weight_charge = logistics

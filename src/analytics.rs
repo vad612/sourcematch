@@ -1,7 +1,6 @@
 use crate::{
     input::{self, ImportStats},
     pipeline::{Output, ResultRow},
-    scoring::{Projection, Wave},
 };
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OpenFlags, params};
@@ -110,102 +109,6 @@ fn p95(values: &mut [f64]) -> f64 {
     values[(values.len() * 95).div_ceil(100) - 1]
 }
 
-#[derive(Default)]
-pub struct Portfolio {
-    rows: Vec<Priority>,
-    pub waves: BTreeMap<Wave, usize>,
-}
-
-struct Priority {
-    id: String,
-    buy: bool,
-    reason: String,
-    wave: Wave,
-    projection: Option<Projection>,
-    review_potential: Option<Decimal>,
-}
-
-impl Portfolio {
-    pub fn record(&mut self, row: &ResultRow) {
-        let Some(scoring) = &row.audit.scoring else {
-            return;
-        };
-        *self.waves.entry(scoring.wave).or_default() += 1;
-        let decision = row.output.decision.as_str();
-        if decision == "не брать" {
-            return;
-        }
-        self.rows.push(Priority {
-            id: row.output.listing_id.clone(),
-            buy: decision == "брать",
-            reason: row.output.reason.clone(),
-            wave: scoring.wave,
-            projection: scoring.projection,
-            review_potential: scoring.review_potential_uzs,
-        });
-    }
-
-    pub fn write(&mut self, path: &Path) -> Result<()> {
-        let financial_key = |row: &Priority| {
-            row.projection
-                .map(|p| (p.contribution_uzs, p.return_on_capital))
-        };
-        self.rows.sort_unstable_by(|a, b| {
-            b.buy
-                .cmp(&a.buy)
-                .then_with(|| financial_key(b).cmp(&financial_key(a)))
-                .then_with(|| b.review_potential.cmp(&a.review_potential))
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        let mut file = tempfile::NamedTempFile::new_in(path.parent().context("portfolio parent")?)?;
-        let mut writer = csv::Writer::from_writer(file.as_file_mut());
-        writer.write_record([
-            "rank",
-            "listing_id",
-            "decision",
-            "reason",
-            "wave",
-            "projected_orders",
-            "batch_units",
-            "unit_margin_floor_uzs",
-            "capital_upper_uzs",
-            "unsold_capital_upper_uzs",
-            "projected_contribution_uzs",
-            "projected_return_on_capital",
-            "manual_review_potential_uzs",
-        ])?;
-        let render = |value: Option<Decimal>, places| {
-            value.map_or_else(String::new, |n| n.round_dp(places).normalize().to_string())
-        };
-        for (position, row) in self.rows.iter().enumerate() {
-            let projection = row.projection;
-            writer.serialize((
-                position + 1,
-                &row.id,
-                if row.buy {
-                    "брать"
-                } else {
-                    "проверить вручную"
-                },
-                &row.reason,
-                row.wave,
-                render(projection.map(|p| p.sold_units), 0),
-                render(projection.map(|p| p.batch_units), 4),
-                render(projection.map(|p| p.unit_margin_uzs), 2),
-                render(projection.map(|p| p.capital_uzs), 2),
-                render(projection.map(|p| p.unsold_capital_uzs), 2),
-                render(projection.map(|p| p.contribution_uzs), 2),
-                render(projection.map(|p| p.return_on_capital), 6),
-                render(row.review_potential, 2),
-            ))?;
-        }
-        writer.flush()?;
-        drop(writer);
-        file.persist(path)?;
-        Ok(())
-    }
-}
-
 #[derive(Default, Serialize)]
 struct Evaluation {
     cards: usize,
@@ -277,6 +180,12 @@ pub fn evaluate(
     out: Option<&Path>,
     verify_synthetic: bool,
 ) -> Result<()> {
+    input::protect_input_files(
+        out,
+        [Some(predictions), Some(labels), audit]
+            .into_iter()
+            .flatten(),
+    )?;
     let mut outputs = HashMap::new();
     for row in csv::Reader::from_path(predictions)?.deserialize::<Output>() {
         let row = row?;
@@ -307,6 +216,14 @@ pub fn evaluate(
         let id = input::value(&row, "listing_id");
         let gold_decision = input::value(&row, "decision");
         let gold_reason = input::value(&row, "reason");
+        ensure!(
+            matches!(gold_decision, "брать" | "не брать" | "проверить вручную"),
+            "invalid reference decision for {id}"
+        );
+        ensure!(
+            row.contains_key("correct_offer_ids") && row.contains_key("reason"),
+            "evaluation labels require correct_offer_ids and reason columns"
+        );
         let observed_amount = |oracle, fallback| {
             let measured = input::value(&row, oracle);
             if measured.is_empty() {
@@ -482,13 +399,17 @@ pub fn evaluate(
             }
         }
         if let Some(db) = &audit {
-            let audit: String = db
+            let (audited_decision, audited_reason, audit): (String, String, String) = db
                 .query_row(
-                    "SELECT data FROM listing_audit WHERE listing_id=?1",
+                    "SELECT decision, reason, data FROM listing_audit WHERE listing_id=?1",
                     [id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .with_context(|| format!("missing audit row {id}"))?;
+            ensure!(
+                audited_decision == decision && audited_reason == output.reason,
+                "audit does not match prediction for {id}"
+            );
             let audit: serde_json::Value = serde_json::from_str(&audit)?;
             if !expected.is_empty() {
                 result.retrieval_checked += 1;

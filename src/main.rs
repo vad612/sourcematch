@@ -1,9 +1,11 @@
 mod analytics;
 mod economics;
 mod input;
+mod matching_eval;
 mod models;
 mod normalize;
 mod pipeline;
+mod portfolio;
 mod scoring;
 mod search;
 mod simulation;
@@ -49,6 +51,31 @@ enum Command {
         #[arg(long)]
         verify_synthetic: bool,
     },
+    EvaluateMatching {
+        #[arg(long)]
+        dataset: PathBuf,
+        #[arg(long)]
+        split: Option<String>,
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[command(flatten)]
+        matching: MatchingFiles,
+    },
+    CompareRisk {
+        /// Named completed run as NAME=PATH. The first plan is the comparison baseline.
+        #[arg(long = "plan", required = true, value_parser = portfolio::Plan::parse)]
+        plans: Vec<portfolio::Plan>,
+        #[arg(long, default_value = "0.80")]
+        base_sales_retention: rust_decimal::Decimal,
+        #[arg(long, default_value = "0.75")]
+        stress_sales_retention: rust_decimal::Decimal,
+        #[arg(long, default_value = "1.15")]
+        stress_cost_multiplier: rust_decimal::Decimal,
+        #[arg(long, default_value = "0.02")]
+        inventory_charge: rust_decimal::Decimal,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     Inspect {
         #[arg(long)]
         audit: PathBuf,
@@ -79,8 +106,8 @@ struct Run {
     input_profile: Option<PathBuf>,
     #[arg(long, default_value = "rules/uzbekistan.toml")]
     rules: PathBuf,
-    #[arg(long, default_value = "rules/products.tsv")]
-    lexicon: PathBuf,
+    #[command(flatten)]
+    matching: MatchingFiles,
     #[arg(long, default_value = "profiles/local.toml")]
     search_profile: PathBuf,
     /// Enable the versioned portfolio scoring policy and publish its priority queue.
@@ -95,6 +122,31 @@ struct Run {
     /// Explicit baseline with real embeddings and BM25, without cross-encoder scores.
     #[arg(long)]
     no_rerank: bool,
+}
+
+#[derive(clap::Args)]
+struct MatchingFiles {
+    #[arg(long, default_value = "rules/products.tsv")]
+    lexicon: PathBuf,
+    #[arg(long, default_value = "rules/matching-terms.toml")]
+    matching_terms: PathBuf,
+    #[arg(long)]
+    matching_overlay: Option<PathBuf>,
+}
+
+impl MatchingFiles {
+    fn load(&self) -> Result<normalize::Lexicon> {
+        let extension = self
+            .matching_overlay
+            .as_ref()
+            .map(std::fs::read_to_string)
+            .transpose()?;
+        normalize::Lexicon::read_with_terms(
+            &std::fs::read_to_string(&self.lexicon)?,
+            &std::fs::read_to_string(&self.matching_terms)?,
+            extension.as_deref(),
+        )
+    }
 }
 
 fn main() -> Result<()> {
@@ -129,6 +181,46 @@ fn main() -> Result<()> {
             audit.as_deref(),
             out.as_deref(),
             verify_synthetic,
+        ),
+        Command::EvaluateMatching {
+            dataset,
+            split,
+            out,
+            matching,
+        } => {
+            input::protect_input_files(
+                out.as_deref(),
+                [
+                    Some(matching.lexicon.as_path()),
+                    Some(matching.matching_terms.as_path()),
+                    matching.matching_overlay.as_deref(),
+                ]
+                .into_iter()
+                .flatten(),
+            )?;
+            matching_eval::evaluate(
+                &matching.load()?,
+                &dataset,
+                split.as_deref(),
+                out.as_deref(),
+            )
+        }
+        Command::CompareRisk {
+            plans,
+            base_sales_retention,
+            stress_sales_retention,
+            stress_cost_multiplier,
+            inventory_charge,
+            out,
+        } => portfolio::compare(
+            &plans,
+            portfolio::Stress {
+                base_sales_retention,
+                sales_retention: stress_sales_retention,
+                cost_multiplier: stress_cost_multiplier,
+                inventory_charge,
+            },
+            out.as_deref(),
         ),
         Command::Inspect { audit, listing_id } => analytics::inspect(&audit, &listing_id),
         Command::Simulate {
@@ -201,7 +293,12 @@ fn run(options: Run) -> Result<()> {
         ("template", options.template.as_ref()),
         ("input_profile", options.input_profile.as_ref()),
         ("rules", Some(&options.rules)),
-        ("lexicon", Some(&options.lexicon)),
+        ("lexicon", Some(&options.matching.lexicon)),
+        ("matching_terms", Some(&options.matching.matching_terms)),
+        (
+            "matching_overlay",
+            options.matching.matching_overlay.as_ref(),
+        ),
         ("search_profile", Some(&options.search_profile)),
         ("scoring_profile", options.scoring_profile.as_ref()),
     ] {
@@ -225,7 +322,7 @@ fn run(options: Run) -> Result<()> {
     model.prepare(&profile, !options.no_rerank)?;
     let mut stats = input::ImportStats::default();
     let source = input::InputProfile::load(options.input_profile.as_deref())?;
-    let lexicon = normalize::Lexicon::read(&std::fs::read_to_string(&options.lexicon)?)?;
+    let lexicon = options.matching.load()?;
     let listings = input::listings(&options.listings, &lexicon, &mut stats, &source.listings)?;
     let offers = input::offers(&options.offers, &lexicon, &mut stats, &source.offers)?;
     ensure!(!offers.is_empty(), "no identifiable offers in input");
@@ -288,7 +385,7 @@ fn run(options: Run) -> Result<()> {
     let mut published = tempfile::NamedTempFile::new_in(output.parent().context("output parent")?)?;
     let mut writer = csv::Writer::from_writer(published.as_file_mut());
     let mut totals = analytics::Totals::default();
-    let mut portfolio = analytics::Portfolio::default();
+    let mut portfolio = portfolio::Portfolio::default();
     let mut vectors = query_vectors.into_iter();
     for (index, window) in ids.chunks(64).enumerate() {
         let queries: Vec<_> = vectors.by_ref().take(window.len()).collect();

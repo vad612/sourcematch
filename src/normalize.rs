@@ -1,6 +1,7 @@
+use anyhow::{Context, Result, ensure};
 use regex::Regex;
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, str::FromStr, sync::LazyLock};
 use unicode_normalization::UnicodeNormalization;
 
@@ -8,10 +9,10 @@ use unicode_normalization::UnicodeNormalization;
 pub struct Facts {
     pub kind: Option<String>,
     pub category: Option<String>,
-    pub material: Option<&'static str>,
-    pub series: Option<&'static str>,
+    pub material: Option<String>,
+    pub series: Option<String>,
     pub measures: BTreeMap<&'static str, Vec<Decimal>>,
-    pub traits: BTreeMap<&'static str, &'static str>,
+    pub traits: BTreeMap<String, String>,
     pub units: Option<u32>,
     pub advertised_pack: Option<u32>,
 }
@@ -33,9 +34,13 @@ impl Facts {
         for (key, value) in &self.traits {
             keys.push(format!("{key}{value}"));
         }
-        for value in [self.kind.as_deref(), self.material, self.series]
-            .into_iter()
-            .flatten()
+        for value in [
+            self.kind.as_deref(),
+            self.material.as_deref(),
+            self.series.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
         {
             keys.push(value.to_string());
         }
@@ -43,20 +48,111 @@ impl Facts {
     }
 
     pub fn group(&self) -> Option<(&str, &str, &str)> {
-        Some((self.kind.as_deref()?, self.material?, self.series?))
+        Some((
+            self.kind.as_deref()?,
+            self.material.as_deref()?,
+            self.series.as_deref()?,
+        ))
     }
 }
 
-pub struct Lexicon(Vec<Kind>);
+pub struct Lexicon {
+    kinds: Vec<Kind>,
+    terms: Terms,
+    pack: PackPatterns,
+}
 
 struct Kind {
     id: String,
     category: String,
     aliases: Vec<String>,
+    substring_aliases: Vec<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Terms {
+    materials: Vec<Aliases>,
+    series: Vec<Aliases>,
+    traits: Vec<TraitAliases>,
+    products: Vec<Aliases>,
+    units: UnitTerms,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Aliases {
+    key: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
+    substring_aliases: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TraitAliases {
+    key: String,
+    value: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
+    substring_aliases: Vec<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct UnitTerms {
+    piece: Vec<String>,
+    set: Vec<String>,
+    offer_pack: Option<String>,
+    listing_pack: Option<String>,
+    pack_attribute: Option<String>,
+}
+
+struct PackPatterns {
+    offer: Vec<Regex>,
+    listing: Vec<Regex>,
+    attributes: Vec<Regex>,
+}
+
+fn pack_pattern(name: &str, pattern: Option<&str>) -> Result<Regex> {
+    let source = pattern.with_context(|| format!("missing units.{name} expression"))?;
+    let pattern = Regex::new(source).with_context(|| format!("invalid units.{name}"))?;
+    ensure!(
+        pattern.captures_len() == 2,
+        "units.{name} needs one numeric capture"
+    );
+    Ok(pattern)
+}
+
+fn pack_patterns(name: &str, base: Option<&str>, overlay: Option<&str>) -> Result<Vec<Regex>> {
+    let mut patterns = vec![pack_pattern(name, base)?];
+    if let Some(extra) = overlay {
+        patterns.push(pack_pattern(name, Some(extra))?);
+    }
+    Ok(patterns)
+}
+
+fn captures_pack<'a>(patterns: &[Regex], text: &'a str) -> Option<regex::Captures<'a>> {
+    patterns.iter().find_map(|pattern| pattern.captures(text))
+}
+
+fn normalize_aliases(aliases: &mut [String]) -> Result<()> {
+    for alias in aliases {
+        *alias = clean(alias.trim());
+        ensure!(!alias.is_empty(), "empty matching alias");
+    }
+    Ok(())
 }
 
 impl Lexicon {
-    pub fn read(text: &str) -> anyhow::Result<Self> {
+    #[cfg(test)]
+    pub fn read(text: &str) -> Result<Self> {
+        Self::read_with_terms(text, include_str!("../rules/matching-terms.toml"), None)
+    }
+
+    pub fn read_with_terms(text: &str, terms: &str, extension: Option<&str>) -> Result<Self> {
         let mut kinds = Vec::new();
         for line in text
             .lines()
@@ -75,52 +171,112 @@ impl Lexicon {
                     .map(clean)
                     .filter(|s| !s.is_empty())
                     .collect(),
+                substring_aliases: Vec::new(),
             });
         }
-        Ok(Self(kinds))
+        let mut terms: Terms = toml::from_str(terms).context("read matching terms")?;
+        let mut pack_additions = UnitTerms::default();
+        if let Some(extension) = extension {
+            let mut overlay: Terms = toml::from_str(extension).context("read matching overlay")?;
+            terms.materials.append(&mut overlay.materials);
+            terms.series.append(&mut overlay.series);
+            terms.traits.append(&mut overlay.traits);
+            terms.products.append(&mut overlay.products);
+            terms.units.piece.append(&mut overlay.units.piece);
+            terms.units.set.append(&mut overlay.units.set);
+            pack_additions = overlay.units;
+        }
+        for item in terms.materials.iter_mut().chain(&mut terms.series) {
+            ensure!(!item.key.is_empty(), "empty canonical matching key");
+            normalize_aliases(&mut item.aliases)?;
+            normalize_aliases(&mut item.substring_aliases)?;
+        }
+        for item in &mut terms.traits {
+            ensure!(
+                !item.key.is_empty() && !item.value.is_empty(),
+                "empty canonical trait"
+            );
+            normalize_aliases(&mut item.aliases)?;
+            normalize_aliases(&mut item.substring_aliases)?;
+        }
+        for mut item in std::mem::take(&mut terms.products) {
+            normalize_aliases(&mut item.aliases)?;
+            normalize_aliases(&mut item.substring_aliases)?;
+            let kind = kinds
+                .iter_mut()
+                .find(|kind| kind.id == item.key)
+                .with_context(|| format!("unknown product kind {}", item.key))?;
+            kind.aliases.append(&mut item.aliases);
+            kind.substring_aliases.append(&mut item.substring_aliases);
+        }
+        normalize_aliases(&mut terms.units.piece)?;
+        normalize_aliases(&mut terms.units.set)?;
+        ensure!(
+            !terms
+                .units
+                .piece
+                .iter()
+                .any(|unit| terms.units.set.contains(unit)),
+            "an alias cannot represent both a piece and a set"
+        );
+        let pack = PackPatterns {
+            offer: pack_patterns(
+                "offer_pack",
+                terms.units.offer_pack.as_deref(),
+                pack_additions.offer_pack.as_deref(),
+            )?,
+            listing: pack_patterns(
+                "listing_pack",
+                terms.units.listing_pack.as_deref(),
+                pack_additions.listing_pack.as_deref(),
+            )?,
+            attributes: pack_patterns(
+                "pack_attribute",
+                terms.units.pack_attribute.as_deref(),
+                pack_additions.pack_attribute.as_deref(),
+            )?,
+        };
+        Ok(Self { kinds, terms, pack })
     }
 
     pub fn facts(&self, title: &str, attrs: &str, sale_unit: Option<&str>) -> Facts {
         let title = clean(title);
         let attrs = clean(attrs);
         let kind = self
-            .0
+            .kinds
             .iter()
             .flat_map(|kind| {
-                kind.aliases
-                    .iter()
-                    .filter(|alias| contains_term(&title, alias))
+                matching_aliases(&title, &kind.aliases, &kind.substring_aliases)
                     .map(move |alias| (alias.len(), kind))
             })
             .max_by_key(|(len, _)| *len)
             .map(|(_, kind)| kind);
-        let material = find_material(&title).or_else(|| find_material(&attrs));
-        let series = TERMS_SERIES
-            .iter()
-            .find(|(_, aliases)| aliases.iter().any(|alias| contains_term(&title, alias)))
-            .map(|(name, _)| *name);
+        let material = find_key(&self.terms.materials, &title)
+            .or_else(|| find_key(&self.terms.materials, &attrs));
+        let series = find_key(&self.terms.series, &title);
         let mut measures = product_measures(&title);
         for (key, value) in product_measures(&attrs) {
             measures.entry(key).or_insert(value);
         }
-        let traits = TRAITS
+        let traits = self
+            .terms
+            .traits
             .iter()
-            .filter_map(|(group, value, aliases)| {
-                aliases
-                    .iter()
-                    .any(|alias| contains_term(&title, alias))
-                    .then_some((*group, *value))
+            .filter(|item| {
+                matching_aliases(&title, &item.aliases, &item.substring_aliases)
+                    .next()
+                    .is_some()
             })
+            .map(|item| (item.key.clone(), item.value.clone()))
             .collect();
         let units = match sale_unit {
-            Some("套" | "set" | "набор") => {
-                SELLER_SET.captures(&title).and_then(|c| whole(&c[1]))
+            Some(unit) if self.terms.units.set.iter().any(|alias| alias == unit) => {
+                captures_pack(&self.pack.offer, &title).and_then(|c| whole(&c[1]))
             }
-            Some("件" | "个" | "只" | "piece" | "pcs" | "шт") => Some(1),
+            Some(unit) if self.terms.units.piece.iter().any(|alias| alias == unit) => Some(1),
             Some(_) => None,
-            None => SIZED_LISTING
-                .captures(&attrs)
-                .or_else(|| LISTING_SET.captures(&title))
+            None => captures_pack(&self.pack.attributes, &attrs)
+                .or_else(|| captures_pack(&self.pack.listing, &title))
                 .and_then(|c| whole(&c[1]))
                 .or(Some(1)),
         };
@@ -133,10 +289,36 @@ impl Lexicon {
             traits,
             units,
             advertised_pack: sale_unit
-                .and_then(|_| SELLER_SET.captures(&title))
+                .and_then(|_| captures_pack(&self.pack.offer, &title))
                 .and_then(|capture| whole(&capture[1])),
         }
     }
+}
+
+fn find_key(terms: &[Aliases], text: &str) -> Option<String> {
+    terms
+        .iter()
+        .find(|item| {
+            matching_aliases(text, &item.aliases, &item.substring_aliases)
+                .next()
+                .is_some()
+        })
+        .map(|item| item.key.clone())
+}
+
+fn matching_aliases<'a>(
+    text: &'a str,
+    words: &'a [String],
+    substrings: &'a [String],
+) -> impl Iterator<Item = &'a String> {
+    words
+        .iter()
+        .filter(move |word| contains_term(text, word))
+        .chain(
+            substrings
+                .iter()
+                .filter(move |part| text.contains(part.as_str())),
+        )
 }
 
 pub fn clean(text: &str) -> String {
@@ -186,101 +368,6 @@ fn whole(input: &str) -> Option<u32> {
     input.parse().ok().filter(|n| *n > 0)
 }
 
-type Aliases = (&'static str, &'static [&'static str]);
-
-const MATERIALS: &[Aliases] = &[
-    (
-        "steel",
-        &[
-            "нержавеющая сталь",
-            "zanglamaydigan po'lat",
-            "不锈钢",
-            "stainless steel",
-        ],
-    ),
-    ("abs", &["abs"]),
-    ("eva", &["eva"]),
-    ("plastic", &["пластик", "plastik", "塑料", "plastic"]),
-    ("silicone", &["силикон", "silikon", "硅胶", "silicone"]),
-    ("bamboo", &["бамбук", "bambuk", "竹制", "竹子", "bamboo"]),
-    ("wood", &["дерево", "yog'och", "实木", "木质", "wood"]),
-    ("metal", &["металл", "metall", "铁艺", "金属", "metal"]),
-    (
-        "polyester",
-        &["полиэстер", "полиэфир", "poliester", "涤纶", "polyester"],
-    ),
-    ("cotton", &["хлопок", "paxta", "纯棉", "棉布", "cotton"]),
-    ("glass", &["стекло", "shisha", "玻璃", "glass"]),
-    ("ceramic", &["керамика", "keramika", "陶瓷", "ceramic"]),
-];
-
-fn find_material(text: &str) -> Option<&'static str> {
-    MATERIALS
-        .iter()
-        .find(|(_, terms)| terms.iter().any(|term| contains_term(text, term)))
-        .map(|(key, _)| *key)
-}
-
-const TERMS_SERIES: &[Aliases] = &[
-    ("classic", &["классик", "klassik", "classic", "经典款"]),
-    ("lite", &["лайт", "lite", "简约款"]),
-    ("max", &["макс", "max", "豪华款"]),
-];
-
-const TRAITS: &[(&str, &str, &[&str])] = &[
-    ("lid", "yes", &["с крышкой", "qopqoqli", "带盖"]),
-    ("lid", "no", &["без крышки", "qopqoqsiz", "无盖"]),
-    ("handles", "yes", &["с ручками", "dastali", "带把手"]),
-    ("handles", "no", &["без ручек", "dastasiz", "无把手"]),
-    (
-        "mount",
-        "wall",
-        &["настенный", "devorga osiladigan", "壁挂式"],
-    ),
-    (
-        "mount",
-        "floor",
-        &["напольный", "polga qo'yiladigan", "落地式"],
-    ),
-    ("levels", "one", &["одноярусный", "bir qavatli", "单层"]),
-    ("levels", "two", &["двухъярусный", "ikki qavatli", "双层"]),
-    ("seal", "yes", &["герметичный", "germetik", "密封"]),
-    ("seal", "no", &["обычный", "oddiy", "普通款"]),
-    ("shape", "round", &["круглый", "dumaloq", "圆形"]),
-    ("shape", "square", &["квадратный", "kvadrat", "方形"]),
-    (
-        "shape",
-        "rect",
-        &["прямоугольный", "to'rtburchak", "长方形"],
-    ),
-    (
-        "fold",
-        "yes",
-        &["складной", "buklanadigan", "yig'iladigan", "可折叠"],
-    ),
-    ("fold", "no", &["каркасный", "karkasli", "固定款"]),
-    (
-        "surface",
-        "non-slip",
-        &["противоскользящий", "sirpanmaydigan", "防滑"],
-    ),
-    ("pattern", "print", &["с принтом", "naqshli", "印花"]),
-    ("pattern", "plain", &["однотонный", "bir rangli", "纯色"]),
-    (
-        "operation",
-        "electronic",
-        &["электронный", "elektron", "电子"],
-    ),
-    (
-        "operation",
-        "mechanical",
-        &["механический", "mexanik", "机械"],
-    ),
-    ("switch", "touch", &["сенсорный", "sensorli", "触摸款"]),
-    ("switch", "button", &["кнопочный", "tugmali", "按键款"]),
-    ("power", "usb", &["usb", "usb充电"]),
-];
-
 static SIZE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(\d+(?:[.,]\d+)?)\s*[xх*]\s*(\d+(?:[.,]\d+)?)(?:\s*[xх*]\s*(\d+(?:[.,]\d+)?))?\s*(cm|厘米|см|sm|mm|毫米|мм)?").unwrap()
 });
@@ -289,15 +376,6 @@ static XYZ: LazyLock<Regex> =
 static SCALAR: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(\d+(?:[.,]\d+)?)\s*(毫升|厘米|毫米|公斤|千克|ml|мл|cm|см|sm|mm|мм|kg|кг|斤|升|米|m|м|l|л)").unwrap()
 });
-static SELLER_SET: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(\d+)\s*(?:个\s*(?:/\s*套|装)|件\s*(?:/\s*套|装)|只装|pcs\s*/\s*set)").unwrap()
-});
-static SIZED_LISTING: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:количество в наборе|to'plamdagi soni|pack size)\s*:\s*(\d+)").unwrap()
-});
-static LISTING_SET: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(\d+)\s*(?:шт|dona|pcs)\b").unwrap());
-
 fn product_measures(text: &str) -> BTreeMap<&'static str, Vec<Decimal>> {
     let mut facts = BTreeMap::new();
     let mut remaining = text.to_owned();

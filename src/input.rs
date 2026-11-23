@@ -159,6 +159,27 @@ pub fn value<'a>(row: &'a Row, field: &str) -> &'a str {
     row.get(field).map(String::as_str).unwrap_or_default()
 }
 
+pub fn protect_input_files<'a>(
+    out: Option<&Path>,
+    sources: impl IntoIterator<Item = &'a Path>,
+) -> Result<()> {
+    if let Some(out) = out
+        && out.try_exists()?
+    {
+        let output = out.canonicalize()?;
+        for source in sources {
+            if source.try_exists()? {
+                ensure!(
+                    source.canonicalize()? != output,
+                    "output would overwrite input {}",
+                    source.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn listings(
     path: &Path,
     lexicon: &Lexicon,

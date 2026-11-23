@@ -1,0 +1,183 @@
+# Canonical matching vocabulary. Order preserves preference among overlapping aliases.
+
+[[materials]]
+key = "steel"
+aliases = ["нержавеющая сталь", "zanglamaydigan po'lat", "不锈钢", "stainless steel"]
+
+[[materials]]
+key = "abs"
+aliases = ["abs"]
+
+[[materials]]
+key = "eva"
+aliases = ["eva"]
+
+[[materials]]
+key = "plastic"
+aliases = ["пластик", "plastik", "塑料", "plastic"]
+
+[[materials]]
+key = "silicone"
+aliases = ["силикон", "silikon", "硅胶", "silicone"]
+
+[[materials]]
+key = "bamboo"
+aliases = ["бамбук", "bambuk", "竹制", "竹子", "bamboo"]
+
+[[materials]]
+key = "wood"
+aliases = ["дерево", "yog'och", "实木", "木质", "wood"]
+
+[[materials]]
+key = "metal"
+aliases = ["металл", "metall", "铁艺", "金属", "metal"]
+
+[[materials]]
+key = "polyester"
+aliases = ["полиэстер", "полиэфир", "poliester", "涤纶", "polyester"]
+
+[[materials]]
+key = "cotton"
+aliases = ["хлопок", "paxta", "纯棉", "棉布", "cotton"]
+
+[[materials]]
+key = "glass"
+aliases = ["стекло", "shisha", "玻璃", "glass"]
+
+[[materials]]
+key = "ceramic"
+aliases = ["керамика", "keramika", "陶瓷", "ceramic"]
+
+[[series]]
+key = "classic"
+aliases = ["классик", "klassik", "classic", "经典款"]
+
+[[series]]
+key = "lite"
+aliases = ["лайт", "lite", "简约款"]
+
+[[series]]
+key = "max"
+aliases = ["макс", "max", "豪华款"]
+
+[[traits]]
+key = "lid"
+value = "yes"
+aliases = ["с крышкой", "qopqoqli", "带盖"]
+
+[[traits]]
+key = "lid"
+value = "no"
+aliases = ["без крышки", "qopqoqsiz", "无盖"]
+
+[[traits]]
+key = "handles"
+value = "yes"
+aliases = ["с ручками", "dastali", "带把手"]
+
+[[traits]]
+key = "handles"
+value = "no"
+aliases = ["без ручек", "dastasiz", "无把手"]
+
+[[traits]]
+key = "mount"
+value = "wall"
+aliases = ["настенный", "devorga osiladigan", "壁挂式"]
+
+[[traits]]
+key = "mount"
+value = "floor"
+aliases = ["напольный", "polga qo'yiladigan", "落地式"]
+
+[[traits]]
+key = "levels"
+value = "one"
+aliases = ["одноярусный", "bir qavatli", "单层"]
+
+[[traits]]
+key = "levels"
+value = "two"
+aliases = ["двухъярусный", "ikki qavatli", "双层"]
+
+[[traits]]
+key = "seal"
+value = "yes"
+aliases = ["герметичный", "germetik", "密封"]
+
+[[traits]]
+key = "seal"
+value = "no"
+aliases = ["обычный", "oddiy", "普通款"]
+
+[[traits]]
+key = "shape"
+value = "round"
+aliases = ["круглый", "dumaloq", "圆形"]
+
+[[traits]]
+key = "shape"
+value = "square"
+aliases = ["квадратный", "kvadrat", "方形"]
+
+[[traits]]
+key = "shape"
+value = "rect"
+aliases = ["прямоугольный", "to'rtburchak", "长方形"]
+
+[[traits]]
+key = "fold"
+value = "yes"
+aliases = ["складной", "buklanadigan", "yig'iladigan", "可折叠"]
+
+[[traits]]
+key = "fold"
+value = "no"
+aliases = ["каркасный", "karkasli", "固定款"]
+
+[[traits]]
+key = "surface"
+value = "non-slip"
+aliases = ["противоскользящий", "sirpanmaydigan", "防滑"]
+
+[[traits]]
+key = "pattern"
+value = "print"
+aliases = ["с принтом", "naqshli", "印花"]
+
+[[traits]]
+key = "pattern"
+value = "plain"
+aliases = ["однотонный", "bir rangli", "纯色"]
+
+[[traits]]
+key = "operation"
+value = "electronic"
+aliases = ["электронный", "elektron", "电子"]
+
+[[traits]]
+key = "operation"
+value = "mechanical"
+aliases = ["механический", "mexanik", "机械"]
+
+[[traits]]
+key = "switch"
+value = "touch"
+aliases = ["сенсорный", "sensorli", "触摸款"]
+
+[[traits]]
+key = "switch"
+value = "button"
+aliases = ["кнопочный", "tugmali", "按键款"]
+
+[[traits]]
+key = "power"
+value = "usb"
+aliases = ["usb", "usb充电"]
+
+[units]
+piece = ["件", "个", "只", "piece", "pcs", "шт"]
+set = ["套", "set", "набор"]
+offer_pack = "(\\d+)\\s*(?:个\\s*(?:/\\s*套|装)|件\\s*(?:/\\s*套|装)|只装|pcs\\s*/\\s*set)"
+listing_pack = "(\\d+)\\s*(?:шт|dona|pcs)\\b"
+pack_attribute = "(?:количество в наборе|to'plamdagi soni|pack size)\\s*:\\s*(\\d+)"

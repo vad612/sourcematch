@@ -71,6 +71,51 @@ fn units_are_canonical_and_colour_is_free() {
 }
 
 #[test]
+fn supplier_packs_can_add_locale_terms_without_touching_the_matching_engine() {
+    let extension = r#"
+[[products]]
+key = "vase"
+substring_aliases = ["花器"]
+[[materials]]
+key = "glass"
+substring_aliases = ["ガラス"]
+[[series]]
+key = "classic"
+substring_aliases = ["クラシック"]
+[[traits]]
+key = "shape"
+value = "round"
+substring_aliases = ["丸型"]
+[units]
+piece = ["個"]
+set = ["セット"]
+offer_pack = '(\d+)個セット'
+"#;
+    let lexicon = Lexicon::read_with_terms(
+        include_str!("../rules/products.tsv"),
+        include_str!("../rules/matching-terms.toml"),
+        Some(extension),
+    )
+    .unwrap();
+    let known = lexicon.facts("Ваза, стекло, 20 см, круглый, серия Классик", "", None);
+    let localized = lexicon.facts("丸型ガラス花器クラシック20cm", "", Some("個"));
+    assert_eq!(known.group(), localized.group());
+    assert_eq!(known.traits, localized.traits);
+    assert_eq!(known.measures, localized.measures);
+    assert_eq!(localized.units, Some(1));
+    assert_eq!(
+        lexicon
+            .facts("ガラス花器3個セット", "", Some("セット"))
+            .units,
+        Some(3)
+    );
+    assert_eq!(
+        lexicon.facts("玻璃花瓶3个/套", "", Some("套")).units,
+        Some(3)
+    );
+}
+
+#[test]
 fn assembled_set_uses_freight_volume_and_bounded_retail_tariff() {
     let market = market();
     let mut listing = listing();
@@ -319,6 +364,51 @@ fn finance_evaluation_uses_outcomes_hidden_from_the_scorer() {
     assert_eq!(finance["committed_capital_uzs"], "200");
     assert_eq!(finance["unsold_capital_uzs"], "140");
     assert_eq!(finance["qualified_contribution_not_captured_uzs"], "110");
+}
+
+#[test]
+fn evaluation_rejects_overwriting_inputs_and_mixed_audit_rows() {
+    let temp = tempfile::tempdir().unwrap();
+    let labels = temp.path().join("labels.csv");
+    let predictions = temp.path().join("predictions.csv");
+    let audit = temp.path().join("audit.sqlite");
+    let prediction = concat!(
+        "listing_id,offer_ids,landed_cost_uzs,unit_margin_uzs,decision,reason,confidence\n",
+        "example,NONE,,,не брать,NO_MATCH,0.95\n",
+    );
+    let reference =
+        "listing_id,correct_offer_ids,decision,reason\nexample,NONE,не брать,NO_MATCH\n";
+    std::fs::write(&predictions, prediction).unwrap();
+    std::fs::write(&labels, reference).unwrap();
+    assert!(
+        crate::analytics::evaluate(&predictions, &labels, None, Some(&labels), false)
+            .unwrap_err()
+            .to_string()
+            .contains("overwrite input")
+    );
+    assert_eq!(std::fs::read_to_string(&labels).unwrap(), reference);
+    std::fs::write(&labels, reference.replace("не брать", "skip")).unwrap();
+    assert!(
+        crate::analytics::evaluate(&predictions, &labels, None, None, false)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid reference decision")
+    );
+    std::fs::write(&labels, reference).unwrap();
+    crate::analytics::AuditStore::open(&audit).unwrap();
+    rusqlite::Connection::open(&audit)
+        .unwrap()
+        .execute(
+            "INSERT INTO listing_audit VALUES (0, 'example', 'брать', 'OK', '{}')",
+            [],
+        )
+        .unwrap();
+    assert!(
+        crate::analytics::evaluate(&predictions, &labels, Some(&audit), None, false)
+            .unwrap_err()
+            .to_string()
+            .contains("audit does not match prediction")
+    );
 }
 
 #[test]
@@ -668,7 +758,11 @@ fn full_cli_uses_reranking_and_keeps_economics_offer_first() {
         template: None,
         input_profile: Some(input_profile),
         rules: Path::new("rules/uzbekistan.toml").into(),
-        lexicon: Path::new("rules/products.tsv").into(),
+        matching: crate::MatchingFiles {
+            lexicon: Path::new("rules/products.tsv").into(),
+            matching_terms: Path::new("rules/matching-terms.toml").into(),
+            matching_overlay: None,
+        },
         search_profile: profile,
         out: output.clone(),
         runs_dir: root.join("runs"),

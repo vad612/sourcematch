@@ -1,203 +1,21 @@
 use crate::{
     economics::{self, Economics, Logistics, Market, Purchase},
-    input::{Catalog, Listing, Offer},
+    input::{Listing, Offer},
     models::{ModelClient, RerankingProfile, SemanticThresholds, embedding_text},
-    normalize::Facts,
     scoring::{self, Trace, Wave},
     search::Hit,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, time::Instant};
+use std::time::Instant;
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-pub enum Match {
-    Rejected,
-    Uncertain,
-    Accepted,
-}
+mod catalog;
+mod decision;
+pub(crate) mod matching;
 
-#[derive(Debug, Clone, Serialize)]
-pub struct Candidate {
-    pub offer_id: String,
-    pub hit: Hit,
-    pub status: Match,
-    pub evidence: i32,
-    pub shared_measures: usize,
-    pub missing: usize,
-    pub reason: &'static str,
-}
-
-fn compare(
-    candidate: Hit,
-    listing: &Facts,
-    offer: &Offer,
-    thresholds: SemanticThresholds,
-) -> Candidate {
-    let facts = &offer.facts;
-    let kind = listing.kind.is_some() && listing.kind == facts.kind;
-    let material = listing.material.is_some() && listing.material == facts.material;
-    let series = listing.series.is_some() && listing.series == facts.series;
-    let mut out = Candidate {
-        offer_id: offer.id.clone(),
-        hit: candidate,
-        status: Match::Uncertain,
-        evidence: i32::from(kind) * 5 + i32::from(material) * 3 + i32::from(series) * 3,
-        shared_measures: 0,
-        missing: 0,
-        reason: "insufficient_identity",
-    };
-    let conflict = [
-        (
-            listing.kind.is_some() && facts.kind.is_some() && !kind,
-            "product",
-        ),
-        (
-            listing.material.is_some() && facts.material.is_some() && !material,
-            "material",
-        ),
-        (
-            listing.series.is_some() && facts.series.is_some() && !series,
-            "series",
-        ),
-        (
-            listing
-                .units
-                .zip(facts.units)
-                .is_some_and(|(buyer, seller)| buyer % seller != 0),
-            "pack",
-        ),
-    ]
-    .into_iter()
-    .find_map(|(failed, name)| failed.then_some(name));
-    if let Some(reason) = conflict {
-        out.status = Match::Rejected;
-        out.reason = reason;
-        return out;
-    }
-    let pack_uncertain = listing
-        .units
-        .zip(facts.advertised_pack)
-        .is_some_and(|(buyer, advertised)| buyer % advertised != 0);
-    for (axis, wanted) in &listing.measures {
-        if let Some(actual) = facts.measures.get(axis) {
-            if actual != wanted {
-                out.status = Match::Rejected;
-                out.reason = "measurement";
-                return out;
-            }
-            out.shared_measures += 1;
-            out.evidence += 4;
-        } else {
-            out.missing += 1;
-        }
-    }
-    for (key, wanted) in &listing.traits {
-        if let Some(actual) = facts.traits.get(key) {
-            if actual != wanted {
-                out.status = Match::Rejected;
-                out.reason = "feature";
-                return out;
-            }
-            out.evidence += 2;
-        } else {
-            out.missing += 1;
-        }
-    }
-    let similarity = out.hit.dense_score.unwrap_or_default();
-    let corroborated = kind && material && series && out.missing == 0;
-    let semantic = material
-        && series
-        && out.shared_measures > 0
-        && out.missing == 0
-        && similarity >= thresholds.minimum_dense
-        && out
-            .hit
-            .reranked
-            .is_some_and(|score| score >= thresholds.minimum_rerank);
-    if pack_uncertain {
-        out.reason = "uncertain_advertised_pack";
-    } else if (corroborated || semantic) && listing.units.is_some() && facts.units.is_some() {
-        out.status = Match::Accepted;
-        out.reason = if corroborated {
-            "verified_facts"
-        } else {
-            "semantic_and_facts"
-        };
-    }
-    out
-}
-
-pub struct CatalogIndex<'a> {
-    entries: &'a [Catalog],
-    linked: HashMap<&'a str, Vec<usize>>,
-}
-
-impl<'a> CatalogIndex<'a> {
-    pub fn new(entries: &'a [Catalog]) -> Self {
-        let mut linked = HashMap::<_, Vec<_>>::new();
-        for (id, entry) in entries
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| !row.offer_id.is_empty())
-        {
-            linked.entry(entry.offer_id.as_str()).or_default().push(id);
-        }
-        Self { entries, linked }
-    }
-
-    fn confirmed(&self, listing: &Facts, offer: &Offer) -> Option<&Catalog> {
-        let candidates = self.linked.get(offer.id.as_str())?;
-        let mut compatible: Vec<_> = candidates
-            .iter()
-            .map(|index| &self.entries[*index])
-            .filter(|entry| {
-                entry.facts.group().is_some()
-                    && entry.facts.group() == listing.group()
-                    && entry.facts.units == listing.units
-                    && offer.facts.units == listing.units
-                    && listing
-                        .measures
-                        .iter()
-                        .all(|(name, quantity)| entry.facts.measures.get(name) == Some(quantity))
-                    && listing
-                        .traits
-                        .iter()
-                        .all(|(name, value)| entry.facts.traits.get(name) == Some(value))
-            })
-            .collect();
-        compatible.sort_by(|a, b| a.id.cmp(&b.id));
-        let first = compatible.first()?;
-        compatible
-            .iter()
-            .all(|other| other.weight == first.weight && other.package == first.package)
-            .then_some(*first)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
-enum State {
-    Pass,
-    Fail,
-    Unknown,
-}
-
-#[derive(Debug, Serialize)]
-struct Gate {
-    code: &'static str,
-    state: State,
-    detail: &'static str,
-}
-
-impl Gate {
-    fn new(code: &'static str, state: State, detail: &'static str) -> Self {
-        Self {
-            code,
-            state,
-            detail,
-        }
-    }
-}
+pub use catalog::CatalogIndex;
+use decision::{Gate, State, demand_gate};
+use matching::{Candidate, Match, compare};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Output {
@@ -551,12 +369,35 @@ impl Context<'_> {
                 })
                 .max();
         }
+        let deferred = self.scoring.and_then(|profile| {
+            let deferral = profile.deferral.as_ref()?;
+            if failed.is_some() {
+                return None;
+            }
+            if deferral.require_confirmed_offer && gates[0].state == State::Unknown {
+                return Some(("NO_MATCH", "закупка отложена по профилю риска, аналог пока не подтверждён"));
+            }
+            if deferral.require_margin_ceiling
+                && gates[3].state == State::Unknown
+                && margin_ceiling_below
+            {
+                return Some(("LOW_MARGIN", "закупка отложена по профилю риска, верхняя маржа подтверждённых предложений ниже порога"));
+            }
+            deferral.demand_reason(listing, self.market).map(|reason| ("LOW_DEMAND", reason))
+        });
+        if deferred.is_some()
+            && let Some(trace) = &mut scoring
+        {
+            trace.wave = Wave::Deferred;
+        }
         let (decision, reason, confidence) = if let Some(gate) = failed {
             (
                 "не брать",
                 format!("{} — {}", gate.code, gate.detail),
                 "0.95",
             )
+        } else if let Some((code, reason)) = deferred {
+            ("не брать", format!("{code} — {reason}"), "0.70")
         } else if scoring
             .as_ref()
             .is_some_and(|trace| trace.wave == Wave::ComparableLogistics)
@@ -641,59 +482,5 @@ impl Context<'_> {
                 scoring,
             },
         })
-    }
-}
-
-fn demand_gate(listing: &Listing, market: &Market) -> Gate {
-    let estimate = |value| value >= market.minimum_orders;
-    match listing.demand {
-        [None, None] => Gate::new(
-            "LOW_DEMAND",
-            State::Unknown,
-            "нет оценок спроса, уточнить ожидаемые заказы",
-        ),
-        [Some(a), Some(b)] if estimate(a) != estimate(b) => Gate::new(
-            "LOW_DEMAND",
-            State::Unknown,
-            "оценки по разные стороны порога, уточнить ожидаемые заказы",
-        ),
-        [Some(a), None] | [None, Some(a)] | [Some(a), Some(_)] if !estimate(a) => {
-            Gate::new("LOW_DEMAND", State::Fail, "ожидаемые заказы ниже порога")
-        }
-        [Some(a), Some(b)]
-            if market.demand_guard.as_ref().is_some_and(|guard| {
-                a.min(b)
-                    .checked_mul(guard.max_source_ratio)
-                    .is_some_and(|limit| a.max(b) > limit)
-            }) =>
-        {
-            Gate::new(
-                "LOW_DEMAND",
-                State::Unknown,
-                "оценки спроса сильно расходятся, сверить с аналитиком",
-            )
-        }
-        [Some(value), None] | [None, Some(value)]
-            if market.demand_guard.as_ref().is_some_and(|guard| {
-                listing
-                    .reviews
-                    .is_some_and(|reviews| reviews < guard.minimum_reviews)
-                    && market
-                        .minimum_orders
-                        .checked_mul(guard.single_source_headroom)
-                        .is_some_and(|limit| value < limit)
-            }) =>
-        {
-            Gate::new(
-                "LOW_DEMAND",
-                State::Unknown,
-                "единственная оценка близка к порогу при малом числе отзывов, сверить прогноз",
-            )
-        }
-        _ => Gate::new(
-            "LOW_DEMAND",
-            State::Pass,
-            "ожидаемые заказы достигают порога",
-        ),
     }
 }

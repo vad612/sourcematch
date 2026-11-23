@@ -1,0 +1,82 @@
+{
+  "cards": 300,
+  "missing_predictions": 0,
+  "matches_available": 264,
+  "top3_hits": 264,
+  "outside_reference": 9,
+  "predicted_offers": 695,
+  "reference_in_retrieval": 264,
+  "retrieval_checked": 264,
+  "no_match_references": 36,
+  "correct_none": 34,
+  "correct_decisions": 228,
+  "successful_launches": 9,
+  "false_launches": 0,
+  "missed_launches": 12,
+  "manual_review": 60,
+  "automatic_coverage": "0.80",
+  "margin_values": 57,
+  "margin_reference_comparisons": 0,
+  "margin_mae_uzs": null,
+  "penalty": "30.0",
+  "by_expected_reason": {
+    "CERT": {
+      "cards": 23,
+      "correct_reason": 23,
+      "manual_review": 0,
+      "penalty": "0"
+    },
+    "LOW_DEMAND": {
+      "cards": 78,
+      "correct_reason": 73,
+      "manual_review": 5,
+      "penalty": "1.5"
+    },
+    "LOW_MARGIN": {
+      "cards": 106,
+      "correct_reason": 76,
+      "manual_review": 19,
+      "penalty": "5.7"
+    },
+    "NO_MATCH": {
+      "cards": 36,
+      "correct_reason": 30,
+      "manual_review": 0,
+      "penalty": "0"
+    },
+    "OK": {
+      "cards": 57,
+      "correct_reason": 9,
+      "manual_review": 36,
+      "penalty": "22.8"
+    }
+  },
+  "by_scoring_wave": {
+    "comparable_logistics": {
+      "cards": 1,
+      "successful_launches": 1,
+      "false_launches": 0,
+      "manual_review": 0
+    },
+    "confirmed": {
+      "cards": 196,
+      "successful_launches": 8,
+      "false_launches": 0,
+      "manual_review": 0
+    },
+    "deferred": {
+      "cards": 43,
+      "successful_launches": 0,
+      "false_launches": 0,
+      "manual_review": 0
+    },
+    "manual": {
+      "cards": 60,
+      "successful_launches": 0,
+      "false_launches": 0,
+      "manual_review": 60
+    }
+  },
+  "synthetic_capital": null,
+  "synthetic_finance": null
+}
