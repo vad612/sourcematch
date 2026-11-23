@@ -1,0 +1,58 @@
+exchange_rate = "1780"
+starter_units = 300
+maximum_moq = 1000
+shipping_per_kg = "39200"
+shipping_per_cubic_meter = "5313000"
+import_vat = "0.12"
+non_pickup = "0.03"
+minimum_margin = "0.18"
+minimum_orders = "60"
+certified = ["Освещение", "Детские товары", "Мелкая техника"]
+
+[commissions]
+"Хранение" = "0.15"
+"Кухня" = "0.15"
+"Ванная" = "0.15"
+"Текстиль" = "0.18"
+"Декор" = "0.20"
+"Спорт дома" = "0.12"
+"Товары для животных" = "0.15"
+"Освещение" = "0.15"
+"Детские товары" = "0.15"
+"Мелкая техника" = "0.10"
+
+[duties]
+plastic = "0.10"
+abs = "0.10"
+silicone = "0.10"
+bamboo = "0.10"
+wood = "0.10"
+metal = "0.10"
+steel = "0.10"
+eva = "0.10"
+cotton = "0.15"
+polyester = "0.15"
+glass = "0.20"
+ceramic = "0.20"
+
+[[fulfillment]]
+liters = "0.6"
+upper_inclusive = false
+fee = "2500"
+delivery = "4000"
+
+[[fulfillment]]
+liters = "5"
+upper_inclusive = false
+fee = "3500"
+delivery = "4000"
+
+[[fulfillment]]
+liters = "37"
+upper_inclusive = true
+fee = "6000"
+delivery = "9000"
+
+[[fulfillment]]
+fee = "12000"
+delivery = "20000"

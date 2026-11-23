@@ -11,3 +11,7 @@ __pycache__/
 /.pytest_cache/
 /.mypy_cache/
 /.ruff_cache/
+
+# Rust builds and local run artifacts
+/target/
+/runs/
