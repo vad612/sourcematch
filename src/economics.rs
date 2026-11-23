@@ -17,10 +17,18 @@ pub struct Market {
     pub non_pickup: Decimal,
     pub minimum_margin: Decimal,
     pub minimum_orders: Decimal,
+    pub demand_guard: Option<DemandGuard>,
     pub certified: Vec<String>,
     pub commissions: BTreeMap<String, Decimal>,
     pub duties: BTreeMap<String, Decimal>,
     pub fulfillment: Vec<Fulfillment>,
+}
+
+#[derive(Deserialize)]
+pub struct DemandGuard {
+    pub max_source_ratio: Decimal,
+    pub single_source_headroom: Decimal,
+    pub minimum_reviews: u32,
 }
 
 #[derive(Deserialize)]
@@ -53,6 +61,14 @@ impl Market {
             .all(nonnegative),
             "negative shipping tariff or demand threshold"
         );
+        if let Some(guard) = &settings.demand_guard {
+            ensure!(
+                guard.max_source_ratio >= Decimal::ONE
+                    && guard.single_source_headroom >= Decimal::ONE
+                    && guard.minimum_reviews > 0,
+                "invalid demand guard"
+            );
+        }
         ensure!(
             settings.commissions.values().copied().all(|commission| {
                 commission >= Decimal::ZERO
@@ -82,8 +98,10 @@ impl Market {
         let mut previous = Decimal::ZERO;
         for (index, band) in settings.fulfillment.iter().enumerate() {
             ensure!(
-                nonnegative(band.fee) && nonnegative(band.delivery),
-                "negative fulfillment charge"
+                nonnegative(band.fee)
+                    && nonnegative(band.delivery)
+                    && band.fee.checked_add(band.delivery).is_some(),
+                "invalid fulfillment charge"
             );
             if let Some(cap) = band.liters {
                 ensure!(
@@ -108,6 +126,24 @@ impl Market {
         })?;
         band.fee.checked_add(band.delivery)
     }
+
+    fn fulfillment_range(&self, liters: Option<Decimal>) -> Option<Range> {
+        if let Some(liters) = liters {
+            return self.fulfillment_charge(liters).map(Range::exact);
+        }
+        let mut fees = self.fulfillment.iter().map(|band| band.fee + band.delivery);
+        let first = fees.next()?;
+        Some(fees.fold(
+            Range {
+                low: first,
+                high: first,
+            },
+            |range, fee| Range {
+                low: range.low.min(fee),
+                high: range.high.max(fee),
+            },
+        ))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -117,7 +153,6 @@ pub struct Range {
 }
 
 impl Range {
-    #[cfg(test)]
     pub fn exact(n: Decimal) -> Self {
         Self { low: n, high: n }
     }
@@ -139,6 +174,7 @@ pub struct Purchase {
     pub offer_index: usize,
     pub eligible: Option<bool>,
     pub supplier_units: Option<u32>,
+    pub batch_in_listing_units: Option<Decimal>,
     pub price: Option<Range>,
 }
 
@@ -147,6 +183,7 @@ pub fn purchase(index: usize, listing: &Facts, offer: &Offer, market: &Market) -
         offer_index: index,
         eligible: None,
         supplier_units: None,
+        batch_in_listing_units: None,
         price: None,
     };
     let (Some(buyer), Some(seller), Some(moq)) = (listing.units, offer.facts.units, offer.moq)
@@ -164,6 +201,8 @@ pub fn purchase(index: usize, listing: &Facts, offer: &Offer, market: &Market) -
     result.supplier_units = u32::try_from(actual).ok();
     if let Some(quantity) = result.supplier_units {
         let conversion = Decimal::from(buyer) / Decimal::from(seller);
+        result.batch_in_listing_units =
+            Some(Decimal::from(quantity) * Decimal::from(seller) / Decimal::from(buyer));
         result.price = price_at(&offer.price_tiers, quantity).and_then(|p| p.times(conversion));
     }
     result
@@ -254,26 +293,37 @@ pub fn logistics(listing: &Facts, offer: &Offer, catalog: Option<&Catalog>) -> L
     };
     let conversion = Decimal::from(buyer) / Decimal::from(seller);
     if let Some((mass, count)) = packed_weight(&offer.weight) {
+        let weight_text = clean(&offer.weight);
         logistics.kg = if let Some(count) = count {
-            let units = if clean(&offer.weight).contains("套/箱") {
+            let compact: String = weight_text.chars().filter(|c| !c.is_whitespace()).collect();
+            let units = if compact.contains("套/箱") {
                 conversion
             } else {
                 Decimal::from(buyer)
             };
             mass.checked_div(Decimal::from(count))
                 .and_then(|m| m.checked_mul(units))
+        } else if ["单个", "单只", "单件"]
+            .iter()
+            .any(|unit| weight_text.starts_with(unit))
+        {
+            mass.checked_mul(Decimal::from(buyer))
         } else {
             mass.checked_mul(conversion)
         };
         logistics.weight_source = logistics.kg.map(|_| format!("offer:{}", offer.id));
     }
-    if buyer == seller
+    if buyer.is_multiple_of(seller)
         && !clean(&offer.package).contains("外箱")
         && let Some(volume) = dimensions_liters(&offer.package)
     {
-        logistics.retail_liters = Some(volume);
-        logistics.freight_liters = Some(volume);
-        logistics.package_source = Some(format!("offer:{}", offer.id));
+        logistics.freight_liters = volume.checked_mul(conversion);
+        if buyer == seller {
+            logistics.retail_liters = Some(volume);
+        }
+        logistics.package_source = logistics
+            .freight_liters
+            .map(|_| format!("offer:{}", offer.id));
     }
     if let Some(entry) = catalog {
         if logistics.kg.is_none() {
@@ -348,9 +398,7 @@ pub fn economics(
         .as_deref()
         .and_then(|c| market.commissions.get(c))
         .copied();
-    let marketplace_charge = logistics
-        .retail_liters
-        .and_then(|liters| market.fulfillment_charge(liters));
+    let marketplace_charge = market.fulfillment_range(logistics.retail_liters)?;
     let threshold_amount = listing
         .price
         .and_then(|price| price.checked_mul(market.minimum_margin));
@@ -361,20 +409,19 @@ pub fn economics(
                 .checked_sub(market.non_pickup)?,
         )
     });
-    let minimum_fee = market
-        .fulfillment
-        .iter()
-        .filter_map(|band| band.fee.checked_add(band.delivery))
-        .min()?;
     let margin_ceiling = revenue.and_then(|income| {
         income
             .checked_sub(landed_minimum)?
-            .checked_sub(marketplace_charge.unwrap_or(minimum_fee))
+            .checked_sub(marketplace_charge.low)
     });
-    let margin = match (revenue, commission, landed, marketplace_charge) {
-        (Some(income), Some(_), Some(cost), Some(fee)) => Some(Range {
-            low: income.checked_sub(cost.high)?.checked_sub(fee)?,
-            high: income.checked_sub(cost.low)?.checked_sub(fee)?,
+    let margin = match (revenue, commission, landed) {
+        (Some(income), Some(_), Some(cost)) => Some(Range {
+            low: income
+                .checked_sub(cost.high)?
+                .checked_sub(marketplace_charge.high)?,
+            high: income
+                .checked_sub(cost.low)?
+                .checked_sub(marketplace_charge.low)?,
         }),
         _ => None,
     };

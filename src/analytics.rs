@@ -1,6 +1,7 @@
 use crate::{
     input::{self, ImportStats},
     pipeline::{Output, ResultRow},
+    scoring::{Projection, Wave},
 };
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OpenFlags, params};
@@ -109,6 +110,102 @@ fn p95(values: &mut [f64]) -> f64 {
     values[(values.len() * 95).div_ceil(100) - 1]
 }
 
+#[derive(Default)]
+pub struct Portfolio {
+    rows: Vec<Priority>,
+    pub waves: BTreeMap<Wave, usize>,
+}
+
+struct Priority {
+    id: String,
+    buy: bool,
+    reason: String,
+    wave: Wave,
+    projection: Option<Projection>,
+    review_potential: Option<Decimal>,
+}
+
+impl Portfolio {
+    pub fn record(&mut self, row: &ResultRow) {
+        let Some(scoring) = &row.audit.scoring else {
+            return;
+        };
+        *self.waves.entry(scoring.wave).or_default() += 1;
+        let decision = row.output.decision.as_str();
+        if decision == "не брать" {
+            return;
+        }
+        self.rows.push(Priority {
+            id: row.output.listing_id.clone(),
+            buy: decision == "брать",
+            reason: row.output.reason.clone(),
+            wave: scoring.wave,
+            projection: scoring.projection,
+            review_potential: scoring.review_potential_uzs,
+        });
+    }
+
+    pub fn write(&mut self, path: &Path) -> Result<()> {
+        let financial_key = |row: &Priority| {
+            row.projection
+                .map(|p| (p.contribution_uzs, p.return_on_capital))
+        };
+        self.rows.sort_unstable_by(|a, b| {
+            b.buy
+                .cmp(&a.buy)
+                .then_with(|| financial_key(b).cmp(&financial_key(a)))
+                .then_with(|| b.review_potential.cmp(&a.review_potential))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let mut file = tempfile::NamedTempFile::new_in(path.parent().context("portfolio parent")?)?;
+        let mut writer = csv::Writer::from_writer(file.as_file_mut());
+        writer.write_record([
+            "rank",
+            "listing_id",
+            "decision",
+            "reason",
+            "wave",
+            "projected_orders",
+            "batch_units",
+            "unit_margin_floor_uzs",
+            "capital_upper_uzs",
+            "unsold_capital_upper_uzs",
+            "projected_contribution_uzs",
+            "projected_return_on_capital",
+            "manual_review_potential_uzs",
+        ])?;
+        let render = |value: Option<Decimal>, places| {
+            value.map_or_else(String::new, |n| n.round_dp(places).normalize().to_string())
+        };
+        for (position, row) in self.rows.iter().enumerate() {
+            let projection = row.projection;
+            writer.serialize((
+                position + 1,
+                &row.id,
+                if row.buy {
+                    "брать"
+                } else {
+                    "проверить вручную"
+                },
+                &row.reason,
+                row.wave,
+                render(projection.map(|p| p.sold_units), 0),
+                render(projection.map(|p| p.batch_units), 4),
+                render(projection.map(|p| p.unit_margin_uzs), 2),
+                render(projection.map(|p| p.capital_uzs), 2),
+                render(projection.map(|p| p.unsold_capital_uzs), 2),
+                render(projection.map(|p| p.contribution_uzs), 2),
+                render(projection.map(|p| p.return_on_capital), 6),
+                render(row.review_potential, 2),
+            ))?;
+        }
+        writer.flush()?;
+        drop(writer);
+        file.persist(path)?;
+        Ok(())
+    }
+}
+
 #[derive(Default, Serialize)]
 struct Evaluation {
     cards: usize,
@@ -122,15 +219,19 @@ struct Evaluation {
     no_match_references: usize,
     correct_none: usize,
     correct_decisions: usize,
+    successful_launches: usize,
     false_launches: usize,
     missed_launches: usize,
     manual_review: usize,
+    automatic_coverage: Decimal,
     margin_values: usize,
     margin_reference_comparisons: usize,
     margin_mae_uzs: Option<Decimal>,
     penalty: Decimal,
     by_expected_reason: BTreeMap<String, Breakdown>,
+    by_scoring_wave: BTreeMap<String, WaveQuality>,
     synthetic_capital: Option<Capital>,
+    synthetic_finance: Option<FinancialOutcomes>,
 }
 
 #[derive(Default, Serialize)]
@@ -138,6 +239,27 @@ struct Capital {
     approved_uzs: Decimal,
     false_launch_uzs: Decimal,
     unsold_after_one_month_uzs: Decimal,
+}
+
+#[derive(Default, Serialize)]
+struct FinancialOutcomes {
+    known_cards: usize,
+    approved_with_outcome: usize,
+    ineligible_approvals: usize,
+    sales_units: Decimal,
+    contribution_uzs: Decimal,
+    committed_capital_uzs: Decimal,
+    unsold_capital_uzs: Decimal,
+    qualified_contribution_not_captured_uzs: Decimal,
+    contribution_on_committed_capital: Option<Decimal>,
+}
+
+#[derive(Default, Serialize)]
+struct WaveQuality {
+    cards: usize,
+    successful_launches: usize,
+    false_launches: usize,
+    manual_review: usize,
 }
 
 #[derive(Default, Serialize)]
@@ -153,6 +275,7 @@ pub fn evaluate(
     labels: &Path,
     audit: Option<&Path>,
     out: Option<&Path>,
+    verify_synthetic: bool,
 ) -> Result<()> {
     let mut outputs = HashMap::new();
     for row in csv::Reader::from_path(predictions)?.deserialize::<Output>() {
@@ -167,6 +290,14 @@ pub fn evaluate(
     let mut reference_stats = ImportStats::default();
     let reference = input::read(labels, "listing_id", true, &mut reference_stats)?;
     ensure!(!reference.is_empty(), "evaluation labels are empty");
+    if verify_synthetic {
+        ensure!(
+            reference.len() == outputs.len(),
+            "synthetic prediction count {} differs from oracle count {}",
+            outputs.len(),
+            reference.len()
+        );
+    }
     let audit = audit
         .map(|path| Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY))
         .transpose()?;
@@ -176,11 +307,44 @@ pub fn evaluate(
         let id = input::value(&row, "listing_id");
         let gold_decision = input::value(&row, "decision");
         let gold_reason = input::value(&row, "reason");
-        let capital_inputs = input::value(&row, "landed_cost_uzs")
-            .parse::<Decimal>()
-            .ok()
+        let observed_amount = |oracle, fallback| {
+            let measured = input::value(&row, oracle);
+            if measured.is_empty() {
+                input::value(&row, fallback).parse::<Decimal>().ok()
+            } else {
+                measured.parse::<Decimal>().ok()
+            }
+        };
+        let capital_inputs = observed_amount("oracle_unit_cost_uzs", "landed_cost_uzs")
             .zip(input::value(&row, "oracle_batch").parse::<Decimal>().ok())
             .zip(input::value(&row, "oracle_demand").parse::<Decimal>().ok());
+        let qualified = input::value(&row, "oracle_qualified").parse::<bool>().ok();
+        if let Some((((cost, batch), demand), margin)) =
+            capital_inputs.zip(observed_amount("oracle_unit_margin_uzs", "unit_margin_uzs"))
+        {
+            let stats = result
+                .synthetic_finance
+                .get_or_insert_with(Default::default);
+            stats.known_cards += 1;
+            let sold = batch.min(demand).floor();
+            let contribution = sold * margin;
+            if outputs
+                .get(id)
+                .is_some_and(|actual| actual.decision == "брать")
+            {
+                stats.approved_with_outcome += 1;
+                stats.ineligible_approvals += usize::from(
+                    qualified.is_some_and(|eligible| !eligible)
+                        || (qualified.is_none() && gold_decision == "не брать"),
+                );
+                stats.sales_units += sold;
+                stats.contribution_uzs += contribution;
+                stats.committed_capital_uzs += batch * cost;
+                stats.unsold_capital_uzs += (batch - sold) * cost;
+            } else if qualified.unwrap_or(gold_decision == "брать") {
+                stats.qualified_contribution_not_captured_uzs += contribution.max(Decimal::ZERO);
+            }
+        }
         if capital_inputs.is_some() {
             result
                 .synthetic_capital
@@ -201,6 +365,59 @@ pub fn evaluate(
             .entry(gold_reason.to_owned())
             .or_default();
         breakdown.cards += 1;
+        if verify_synthetic {
+            let actual = outputs
+                .get(id)
+                .with_context(|| format!("synthetic prediction missing for {id}"))?;
+            for field in [
+                "correct_offer_ids",
+                "decision",
+                "reason",
+                "landed_cost_uzs",
+                "unit_margin_uzs",
+            ] {
+                ensure!(
+                    row.contains_key(field),
+                    "synthetic oracle missing column {field}"
+                );
+            }
+            for (field, actual, expected) in [
+                (
+                    "offer_ids",
+                    actual.offer_ids.as_str(),
+                    input::value(&row, "correct_offer_ids"),
+                ),
+                ("decision", actual.decision.as_str(), gold_decision),
+                (
+                    "reason",
+                    actual.reason.split_whitespace().next().unwrap_or_default(),
+                    gold_reason,
+                ),
+            ] {
+                ensure!(
+                    actual == expected,
+                    "synthetic {id} {field}: expected {expected:?}, got {actual:?}"
+                );
+            }
+            for (field, actual) in [
+                ("landed_cost_uzs", actual.landed_cost_uzs.as_str()),
+                ("unit_margin_uzs", actual.unit_margin_uzs.as_str()),
+            ] {
+                let expected = input::value(&row, field);
+                let matches = if expected.is_empty() {
+                    actual.is_empty()
+                } else {
+                    let expected = expected
+                        .parse::<Decimal>()
+                        .with_context(|| format!("invalid synthetic oracle {id} {field}"))?;
+                    actual.parse::<Decimal>().ok() == Some(expected)
+                };
+                ensure!(
+                    matches,
+                    "synthetic {id} {field}: expected {expected:?}, got {actual:?}"
+                );
+            }
+        }
         let Some(output) = outputs.get(id) else {
             result.missing_predictions += 1;
             result.manual_review += 1;
@@ -228,12 +445,15 @@ pub fn evaluate(
             && let Some(capital) = &mut result.synthetic_capital
         {
             capital.approved_uzs += unit_cost * batch;
-            capital.unsold_after_one_month_uzs += unit_cost * (batch - demand).max(Decimal::ZERO);
-            if gold_decision == "не брать" {
+            capital.unsold_after_one_month_uzs += unit_cost * (batch - batch.min(demand).floor());
+            if qualified.is_some_and(|eligible| !eligible)
+                || (qualified.is_none() && gold_decision == "не брать")
+            {
                 capital.false_launch_uzs += unit_cost * batch;
             }
         }
         result.correct_decisions += usize::from(decision == gold_decision);
+        result.successful_launches += usize::from(decision == "брать" && gold_decision == "брать");
         breakdown.correct_reason +=
             usize::from(output.reason.split_whitespace().next() == Some(gold_reason));
         let penalty = match (decision, gold_decision) {
@@ -261,9 +481,7 @@ pub fn evaluate(
                 result.margin_reference_comparisons += 1;
             }
         }
-        if let Some(db) = &audit
-            && !expected.is_empty()
-        {
+        if let Some(db) = &audit {
             let audit: String = db
                 .query_row(
                     "SELECT data FROM listing_audit WHERE listing_id=?1",
@@ -272,20 +490,40 @@ pub fn evaluate(
                 )
                 .with_context(|| format!("missing audit row {id}"))?;
             let audit: serde_json::Value = serde_json::from_str(&audit)?;
-            result.retrieval_checked += 1;
-            result.reference_in_retrieval +=
-                usize::from(audit["candidates"].as_array().is_some_and(|candidates| {
-                    candidates.iter().any(|candidate| {
-                        candidate["offer_id"]
-                            .as_str()
-                            .is_some_and(|offer| expected.contains(offer))
-                    })
-                }));
+            if !expected.is_empty() {
+                result.retrieval_checked += 1;
+                result.reference_in_retrieval +=
+                    usize::from(audit["candidates"].as_array().is_some_and(|candidates| {
+                        candidates.iter().any(|candidate| {
+                            candidate["offer_id"]
+                                .as_str()
+                                .is_some_and(|offer| expected.contains(offer))
+                        })
+                    }));
+            }
+            if let Some(wave) = audit["scoring"]["wave"].as_str() {
+                let counts = result.by_scoring_wave.entry(wave.into()).or_default();
+                counts.cards += 1;
+                counts.successful_launches +=
+                    usize::from(decision == "брать" && gold_decision == "брать");
+                counts.false_launches +=
+                    usize::from(decision == "брать" && gold_decision == "не брать");
+                counts.manual_review += usize::from(decision == "проверить вручную");
+            }
         }
     }
     if result.margin_reference_comparisons != 0 {
         result.margin_mae_uzs =
             Some(absolute_error / Decimal::from(result.margin_reference_comparisons));
+    }
+    result.automatic_coverage = (Decimal::from(result.cards - result.manual_review)
+        / Decimal::from(result.cards))
+    .round_dp(6);
+    if let Some(finance) = &mut result.synthetic_finance {
+        finance.contribution_on_committed_capital = finance
+            .contribution_uzs
+            .checked_div(finance.committed_capital_uzs)
+            .map(|value| value.round_dp(6));
     }
     if let Some(path) = out {
         write_json(path, &result)?;

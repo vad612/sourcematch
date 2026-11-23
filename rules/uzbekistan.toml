@@ -56,3 +56,8 @@ delivery = "9000"
 [[fulfillment]]
 fee = "12000"
 delivery = "20000"
+
+[demand_guard]
+max_source_ratio = "2"
+single_source_headroom = "1.5"
+minimum_reviews = 5

@@ -1,0 +1,12 @@
+demand_retention = "0.80"
+inventory_charge_rate = "0.02"
+minimum_return = "0.05"
+
+[logistics]
+minimum_suppliers = 2
+maximum_spread = "2"
+padding = "1.10"
+
+[demand]
+minimum_sources = 2
+# Both recovery waves for comparative evaluation.

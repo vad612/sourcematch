@@ -36,11 +36,13 @@ pub struct Listing {
     pub facts: Facts,
     pub price: Option<Decimal>,
     pub demand: [Option<Decimal>; 2],
+    pub reviews: Option<u32>,
 }
 
 #[derive(Debug)]
 pub struct Offer {
     pub id: String,
+    pub supplier_id: String,
     pub title: String,
     pub facts: Facts,
     pub moq: Option<u32>,
@@ -175,6 +177,7 @@ pub fn listings(
                     price: positive(value(&row, "price_uzs")),
                     demand: ["est_orders_a", "est_orders_b"]
                         .map(|key| decimal(value(&row, key)).filter(|n| !n.is_sign_negative())),
+                    reviews: value(&row, "reviews").parse().ok(),
                 }
             })
             .collect(),
@@ -200,6 +203,7 @@ pub fn offers(
             // Descriptions are supplier-controlled. Product identity uses the title and structured terms.
             Offer {
                 id: value(&row, "offer_id").to_owned(),
+                supplier_id: value(&row, "supplier_id").to_owned(),
                 title: title.to_owned(),
                 facts: lexicon.facts(title, material, Some(&unit)),
                 moq: value(&row, "moq").parse::<u32>().ok().filter(|n| *n > 0),

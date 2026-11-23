@@ -1,8 +1,9 @@
 use crate::{
     economics::{self, Economics, Logistics, Market, Purchase},
     input::{Catalog, Listing, Offer},
-    models::{ModelClient, RerankingProfile, embedding_text},
+    models::{ModelClient, RerankingProfile, SemanticThresholds, embedding_text},
     normalize::Facts,
+    scoring::{self, Trace, Wave},
     search::Hit,
 };
 use anyhow::Result;
@@ -27,7 +28,12 @@ pub struct Candidate {
     pub reason: &'static str,
 }
 
-fn compare(candidate: Hit, listing: &Facts, offer: &Offer) -> Candidate {
+fn compare(
+    candidate: Hit,
+    listing: &Facts,
+    offer: &Offer,
+    thresholds: SemanticThresholds,
+) -> Candidate {
     let facts = &offer.facts;
     let kind = listing.kind.is_some() && listing.kind == facts.kind;
     let material = listing.material.is_some() && listing.material == facts.material;
@@ -104,8 +110,11 @@ fn compare(candidate: Hit, listing: &Facts, offer: &Offer) -> Candidate {
         && series
         && out.shared_measures > 0
         && out.missing == 0
-        && similarity >= 0.80
-        && out.hit.reranked.is_some_and(|score| score >= 0.65);
+        && similarity >= thresholds.minimum_dense
+        && out
+            .hit
+            .reranked
+            .is_some_and(|score| score >= thresholds.minimum_rerank);
     if pack_uncertain {
         out.reason = "uncertain_advertised_pack";
     } else if (corroborated || semantic) && listing.units.is_some() && facts.units.is_some() {
@@ -213,6 +222,7 @@ pub struct Audit {
     pub finance_ms: f64,
     pub reranking_ms: f64,
     pub retrieval_ms: f64,
+    pub scoring: Option<Trace>,
 }
 
 pub struct ResultRow {
@@ -225,6 +235,8 @@ pub struct Context<'a> {
     pub catalog: &'a CatalogIndex<'a>,
     pub market: &'a Market,
     pub reranker: Option<(&'a ModelClient, &'a RerankingProfile)>,
+    pub semantic: SemanticThresholds,
+    pub scoring: Option<&'a scoring::Profile>,
 }
 
 impl Context<'_> {
@@ -246,6 +258,7 @@ impl Context<'_> {
                 audit: Audit {
                     candidates: Vec::new(), procurement: Vec::new(), gates: Vec::new(), selected: None,
                     economics: None, logistics: None, matching_ms: 0., finance_ms: 0., reranking_ms: 0., retrieval_ms,
+                    scoring: self.scoring.map(|_| Trace::default()),
                 },
             });
         };
@@ -254,7 +267,7 @@ impl Context<'_> {
             .into_iter()
             .map(|hit| {
                 let offer = &self.offers[hit.offer];
-                compare(hit, &listing.facts, offer)
+                compare(hit, &listing.facts, offer, self.semantic)
             })
             .collect();
         candidates.sort_by(|a, b| {
@@ -293,6 +306,7 @@ impl Context<'_> {
                             candidate.hit.clone(),
                             &listing.facts,
                             &self.offers[candidate.hit.offer],
+                            self.semantic,
                         );
                     }
                 }
@@ -458,11 +472,111 @@ impl Context<'_> {
         let gates = vec![membership, certified, moq, margin, demand];
         let failed = gates.iter().find(|gate| gate.state == State::Fail);
         let unknown = gates.iter().find(|gate| gate.state == State::Unknown);
+        let mut scoring = self.scoring.map(|_| Trace {
+            wave: if failed.is_some() || unknown.is_none() {
+                Wave::Confirmed
+            } else {
+                Wave::Manual
+            },
+            ..Trace::default()
+        });
+        if let (Some(profile), Some(trace), Some(winner), Some((_, exact, shipping))) =
+            (self.scoring, &mut scoring, winner, economics)
+            && failed.is_none()
+        {
+            let margin_pass = gates[3].state == State::Pass;
+            let demand_pass = gates[4].state == State::Pass;
+            trace.stress_demand = profile.demand_floor(listing);
+            trace.projection = exact
+                .as_ref()
+                .and_then(|e| profile.project(listing, winner, e));
+            if unknown.is_some() && gates[..3].iter().all(|gate| gate.state == State::Pass) {
+                let estimated = (!margin_pass)
+                    .then(|| {
+                        let policy = profile.logistics.as_ref()?;
+                        policy.estimate(
+                            listing,
+                            &self.offers[winner.offer_index],
+                            shipping,
+                            accepted
+                                .iter()
+                                .map(|candidate| &self.offers[candidate.hit.offer]),
+                            winner.price,
+                            self.market,
+                        )
+                    })
+                    .flatten();
+                if let Some((range, peers)) = &estimated {
+                    trace.projection = profile.project(listing, winner, range);
+                    trace.peer_offer_ids.clone_from(peers);
+                }
+                let margin_supported = margin_pass
+                    || estimated.as_ref().is_some_and(|(range, _)| {
+                        range
+                            .margin
+                            .zip(range.threshold_amount)
+                            .is_some_and(|(margin, threshold)| margin.low >= threshold)
+                    });
+                let demand_supported = demand_pass
+                    || profile.demand.as_ref().is_some_and(|policy| {
+                        listing.demand.iter().flatten().count() >= policy.minimum_sources
+                            && trace
+                                .stress_demand
+                                .is_some_and(|d| d >= self.market.minimum_orders)
+                    });
+                if margin_supported
+                    && demand_supported
+                    && trace
+                        .projection
+                        .as_ref()
+                        .is_some_and(|p| profile.financially_viable(p))
+                {
+                    trace.wave = if demand_pass {
+                        Wave::ComparableLogistics
+                    } else {
+                        Wave::DemandStress
+                    };
+                }
+            }
+        }
+        if let (Some(profile), Some(trace)) = (self.scoring, &mut scoring)
+            && trace.wave == Wave::Manual
+            && trace.projection.is_none()
+        {
+            trace.review_potential_uzs = evaluated
+                .iter()
+                .filter_map(|(index, economics, _)| {
+                    let purchase = procurement.iter().find(|p| p.offer_index == *index)?;
+                    profile.review_potential(listing, purchase, economics.as_ref()?)
+                })
+                .max();
+        }
         let (decision, reason, confidence) = if let Some(gate) = failed {
             (
                 "не брать",
                 format!("{} — {}", gate.code, gate.detail),
                 "0.95",
+            )
+        } else if scoring
+            .as_ref()
+            .is_some_and(|trace| trace.wave == Wave::ComparableLogistics)
+        {
+            (
+                "брать",
+                "OK — запас маржи подтверждён в сценарии логистики сопоставимых поставщиков".into(),
+                "0.65",
+            )
+        } else if let Some(trace) = &scoring
+            && trace.wave == Wave::DemandStress
+        {
+            (
+                "брать",
+                if trace.peer_offer_ids.is_empty() {
+                    "OK — спрос проходит порог в консервативном сценарии".into()
+                } else {
+                    "OK — маржа и спрос проходят пороги в консервативном сценарии".into()
+                },
+                "0.60",
             )
         } else if let Some(gate) = unknown {
             (
@@ -524,31 +638,57 @@ impl Context<'_> {
                 finance_ms: finance_started.elapsed().as_secs_f64() * 1000.,
                 reranking_ms,
                 retrieval_ms,
+                scoring,
             },
         })
     }
 }
 
 fn demand_gate(listing: &Listing, market: &Market) -> Gate {
-    let passes: Vec<_> = listing
-        .demand
-        .iter()
-        .flatten()
-        .map(|value| *value >= market.minimum_orders)
-        .collect();
-    match passes.as_slice() {
-        [] => Gate::new(
+    let estimate = |value| value >= market.minimum_orders;
+    match listing.demand {
+        [None, None] => Gate::new(
             "LOW_DEMAND",
             State::Unknown,
             "нет оценок спроса, уточнить ожидаемые заказы",
         ),
-        [true, false] | [false, true] => Gate::new(
+        [Some(a), Some(b)] if estimate(a) != estimate(b) => Gate::new(
             "LOW_DEMAND",
             State::Unknown,
             "оценки по разные стороны порога, уточнить ожидаемые заказы",
         ),
-        [false] | [false, false] => {
+        [Some(a), None] | [None, Some(a)] | [Some(a), Some(_)] if !estimate(a) => {
             Gate::new("LOW_DEMAND", State::Fail, "ожидаемые заказы ниже порога")
+        }
+        [Some(a), Some(b)]
+            if market.demand_guard.as_ref().is_some_and(|guard| {
+                a.min(b)
+                    .checked_mul(guard.max_source_ratio)
+                    .is_some_and(|limit| a.max(b) > limit)
+            }) =>
+        {
+            Gate::new(
+                "LOW_DEMAND",
+                State::Unknown,
+                "оценки спроса сильно расходятся, сверить с аналитиком",
+            )
+        }
+        [Some(value), None] | [None, Some(value)]
+            if market.demand_guard.as_ref().is_some_and(|guard| {
+                listing
+                    .reviews
+                    .is_some_and(|reviews| reviews < guard.minimum_reviews)
+                    && market
+                        .minimum_orders
+                        .checked_mul(guard.single_source_headroom)
+                        .is_some_and(|limit| value < limit)
+            }) =>
+        {
+            Gate::new(
+                "LOW_DEMAND",
+                State::Unknown,
+                "единственная оценка близка к порогу при малом числе отзывов, сверить прогноз",
+            )
         }
         _ => Gate::new(
             "LOW_DEMAND",

@@ -1,0 +1,4 @@
+# Rank baseline decisions by the same financial scenarios as the pilot.
+demand_retention = "0.80"
+inventory_charge_rate = "0.02"
+minimum_return = "0.05"

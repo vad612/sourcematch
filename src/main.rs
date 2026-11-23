@@ -4,6 +4,7 @@ mod input;
 mod models;
 mod normalize;
 mod pipeline;
+mod scoring;
 mod search;
 mod simulation;
 
@@ -44,6 +45,9 @@ enum Command {
         audit: Option<PathBuf>,
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Require every synthetic decision, offer list and monetary field to match its oracle.
+        #[arg(long)]
+        verify_synthetic: bool,
     },
     Inspect {
         #[arg(long)]
@@ -79,6 +83,9 @@ struct Run {
     lexicon: PathBuf,
     #[arg(long, default_value = "profiles/local.toml")]
     search_profile: PathBuf,
+    /// Enable the versioned portfolio scoring policy and publish its priority queue.
+    #[arg(long)]
+    scoring_profile: Option<PathBuf>,
     #[arg(long, default_value = "submission.csv")]
     out: PathBuf,
     #[arg(long, default_value = "runs")]
@@ -115,7 +122,14 @@ fn main() -> Result<()> {
             labels,
             audit,
             out,
-        } => analytics::evaluate(&predictions, &labels, audit.as_deref(), out.as_deref()),
+            verify_synthetic,
+        } => analytics::evaluate(
+            &predictions,
+            &labels,
+            audit.as_deref(),
+            out.as_deref(),
+            verify_synthetic,
+        ),
         Command::Inspect { audit, listing_id } => analytics::inspect(&audit, &listing_id),
         Command::Simulate {
             seed,
@@ -134,12 +148,15 @@ struct RunManifest {
     embedding_model: String,
     embedding_revision: String,
     reranking_model: Option<String>,
+    reranking_protocol: Option<models::RerankingProtocol>,
     build_version: &'static str,
     inputs: HashMap<String, String>,
     import: input::ImportStats,
     model: ModelStats,
     decisions: std::collections::BTreeMap<String, usize>,
     reasons: std::collections::BTreeMap<String, usize>,
+    portfolio: Option<PathBuf>,
+    scoring_waves: std::collections::BTreeMap<scoring::Wave, usize>,
     audit: PathBuf,
     output: PathBuf,
     output_sha256: String,
@@ -186,6 +203,7 @@ fn run(options: Run) -> Result<()> {
         ("rules", Some(&options.rules)),
         ("lexicon", Some(&options.lexicon)),
         ("search_profile", Some(&options.search_profile)),
+        ("scoring_profile", options.scoring_profile.as_ref()),
     ] {
         if let Some(path) = path {
             ensure!(
@@ -197,6 +215,11 @@ fn run(options: Run) -> Result<()> {
         }
     }
     let market = economics::Market::load(&options.rules)?;
+    let scoring = options
+        .scoring_profile
+        .as_deref()
+        .map(scoring::Profile::load)
+        .transpose()?;
     let profile = Profile::load(&options.search_profile)?;
     let model = ModelClient::new()?;
     model.prepare(&profile, !options.no_rerank)?;
@@ -254,6 +277,8 @@ fn run(options: Run) -> Result<()> {
         market: &market,
         catalog: &catalog_index,
         reranker: (!options.no_rerank).then_some((&model, &profile.reranking)),
+        semantic: profile.search.semantic,
+        scoring: scoring.as_ref(),
     };
     let workers = rayon::ThreadPoolBuilder::new()
         .num_threads(usize::from(options.workers))
@@ -263,6 +288,7 @@ fn run(options: Run) -> Result<()> {
     let mut published = tempfile::NamedTempFile::new_in(output.parent().context("output parent")?)?;
     let mut writer = csv::Writer::from_writer(published.as_file_mut());
     let mut totals = analytics::Totals::default();
+    let mut portfolio = analytics::Portfolio::default();
     let mut vectors = query_vectors.into_iter();
     for (index, window) in ids.chunks(64).enumerate() {
         let queries: Vec<_> = vectors.by_ref().take(window.len()).collect();
@@ -321,6 +347,7 @@ fn run(options: Run) -> Result<()> {
         audit.write(index * 64, &rows)?;
         for row in rows {
             totals.record(&row);
+            portfolio.record(&row);
             writer.serialize(&row.output)?;
         }
         let done = (index + 1) * 64;
@@ -333,6 +360,12 @@ fn run(options: Run) -> Result<()> {
     published.as_file().sync_all()?;
     ensure!(totals.count == ids.len(), "wrong output row count");
     let output_sha256 = digest(published.path())?;
+    let portfolio_path = scoring
+        .as_ref()
+        .map(|_| options.runs_dir.join(format!("{run_id}-portfolio.csv")));
+    if let Some(path) = &portfolio_path {
+        portfolio.write(path)?;
+    }
     published.persist(&output)?;
     let manifest = RunManifest {
         run_id: run_id.clone(),
@@ -342,12 +375,15 @@ fn run(options: Run) -> Result<()> {
         embedding_model: profile.embedding.model,
         embedding_revision: profile.embedding.revision,
         reranking_model: (!options.no_rerank).then_some(profile.reranking.model),
+        reranking_protocol: (!options.no_rerank).then_some(profile.reranking.protocol),
         build_version: env!("CARGO_PKG_VERSION"),
         inputs,
         import: stats,
         model: model_stats,
         decisions: totals.decisions.clone(),
         reasons: totals.reasons.clone(),
+        portfolio: portfolio_path,
+        scoring_waves: portfolio.waves,
         latency_ms: totals.finish(),
         audit: audit_path,
         output,
